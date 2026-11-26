@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 eval_results.json
 .claude/
+*.egg-info/
