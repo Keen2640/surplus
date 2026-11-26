@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Surplus LDI Engine</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#0d1117;--panel:#151b23;--line:#263040;--text:#e6edf3;--muted:#8b98a9;--accent:#4ea1ff;--good:#3fb950;--bad:#f85149;--warn:#d29922}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+header{padding:20px 24px 8px}h1{margin:0;font-size:20px}header p{margin:4px 0 0;color:var(--muted)}
+main{padding:12px 24px 40px;display:grid;gap:16px;grid-template-columns:repeat(12,1fr)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+.c12{grid-column:span 12}.c6{grid-column:span 6}.c4{grid-column:span 4}.c8{grid-column:span 8}
+@media(max-width:900px){.c6,.c4,.c8{grid-column:span 12}main{padding:12px 16px}}
+h2{font-size:14px;margin:0 0 10px;letter-spacing:.3px}.sub{color:var(--muted);font-size:12px;margin:-6px 0 10px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.kpi{border:1px solid var(--line);border-radius:10px;padding:10px 12px}.kpi b{display:block;font-size:20px;font-variant-numeric:tabular-nums}.kpi span{color:var(--muted);font-size:12px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:12.5px}th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}th{color:var(--muted);font-weight:500}
+.controls{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:10px;color:var(--muted);font-size:12px}
+input[type=range]{accent-color:var(--accent)}select,button,textarea{background:#0f141b;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font:inherit}
+button{cursor:pointer;background:var(--accent);border:0;color:#04121f;font-weight:600}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#1f2a37;color:var(--muted);font-size:11px}
+.scroll{overflow-x:auto}canvas{max-width:100%}#answer{white-space:pre-wrap;margin-top:10px}
+.good{color:var(--good)}.bad{color:var(--bad)}
+</style>
+</head>
+<body>
+<header><h1>Surplus: pension LDI engine</h1>
+<p id="hdr">Liability valuation, key-rate hedging and funded-status risk for a frozen corporate DB plan</p></header>
+<main>
+  <section class="card c12"><div class="kpis" id="kpis"></div></section>
+
+  <section class="card c6"><h2>Treasury curve</h2><div class="sub" id="curveSub"></div><canvas id="curveChart" height="220"></canvas></section>
+  <section class="card c6"><h2>Expected benefit payments</h2><div class="sub">SSA 2023 mortality with generational improvement</div><canvas id="cfChart" height="220"></canvas></section>
+
+  <section class="card c8"><h2>Key-rate hedge</h2><div class="sub">Treasury STRIPS, Treasury bonds and receive-fixed swaps, optimised to match the liability's key-rate DV01s</div>
+    <div class="controls">
+      <label>Hedge ratio <input id="tgt" type="range" min="0.3" max="1.2" step="0.05" value="0.9"> <b id="tgtV"></b></label>
+      <label>Assets in bonds <input id="phys" type="range" min="0.2" max="1" step="0.05" value="0.4"> <b id="physV"></b></label>
+      <label><input id="swaps" type="checkbox" checked> Swap overlay</label>
+    </div>
+    <canvas id="krdChart" height="200"></canvas><div class="sub" id="hedgeSub" style="margin-top:8px"></div></section>
+  <section class="card c4"><h2>Hedge holdings</h2><div class="scroll"><table id="holdings"></table></div></section>
+
+  <section class="card c4"><h2>Rate shock</h2><div class="controls"><label>Parallel shift <input id="shock" type="range" min="-200" max="200" step="25" value="-100"> <b id="shockV"></b></label></div>
+    <table id="shockT"></table><h2 style="margin-top:16px">Longevity</h2><table id="lonT"></table></section>
+  <section class="card c8"><h2>Funded ratio over 10 years</h2><div class="sub">Hull-White rates fitted to today's curve and correlated equities: 5,000 scenarios, 5th–95th percentile band</div>
+    <div class="controls"><select id="strat"></select><label><input id="ratesOnly" type="checkbox"> Rates risk only</label></div>
+    <canvas id="fanChart" height="200"></canvas></section>
+
+  <section class="card c12"><h2>Strategy comparison</h2><div class="scroll"><table id="stratT"></table></div></section>
+
+  <section class="card c12"><h2>Ask the analyst <span class="pill">Claude + engine tools, every number audited</span></h2>
+    <textarea id="q" rows="2" style="width:100%">If rates fall 100bp, how much does the deficit grow, and what hedge would you put on with 40% of assets in bonds?</textarea>
+    <div style="margin-top:8px"><button id="askBtn">Ask</button></div><div id="answer"></div></section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const M=x=>'$'+(x/1e6).toLocaleString(undefined,{maximumFractionDigits:1})+'M';
+const P=(x,d=1)=>(x*100).toFixed(d)+'%';
+const css=getComputedStyle(document.documentElement), C={a:css.getPropertyValue('--accent').trim(),g:css.getPropertyValue('--good').trim(),b:css.getPropertyValue('--bad').trim(),m:css.getPropertyValue('--muted').trim(),l:css.getPropertyValue('--line').trim(),w:css.getPropertyValue('--warn').trim()};
+Chart.defaults.color=C.m;Chart.defaults.borderColor=C.l;Chart.defaults.font.size=11;
+const charts={};function chart(id,cfg){charts[id]?.destroy();charts[id]=new Chart($(id),cfg)}
+const get=u=>fetch(u).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});
+
+async function init(){
+  const s=await get('/api/summary');
+  $('hdr').textContent=`Treasury curve ${s.curve_date} · ${s.census.participants.toLocaleString()} participants · discount spread ${s.discount_spread_bp.toFixed(0)}bp · mortality improvement ${P(s.mortality_improvement)}`;
+  $('kpis').innerHTML=[['Liability PV',M(s.liability_pv)],['Assets',M(s.assets)],['Funded ratio',P(s.funded_ratio)],['Deficit',M(s.liability_pv-s.assets)],['Duration',s.effective_duration.toFixed(2)+' yrs'],['DV01','$'+Math.round(s.dv01).toLocaleString()],['Next-year benefits',M(s.next_year_benefits)]]
+    .map(([k,v])=>`<div class="kpi"><b>${v}</b><span>${k}</span></div>`).join('');
+  const c=await get('/api/curve');
+  $('curveSub').textContent=`Nelson-Siegel-Svensson fit: RMSE ${c.fit.rmse_bp.toFixed(2)}bp, max ${c.fit.max_abs_bp.toFixed(2)}bp vs. observed par yields`;
+  chart('curveChart',{type:'line',data:{datasets:[
+    {label:'Par yield (observed)',data:c.par.tenor.map((t,i)=>({x:t,y:c.par.yield[i]})),showLine:false,pointRadius:4,backgroundColor:C.w,borderColor:C.w},
+    {label:'Zero (NSS)',data:c.t.map((t,i)=>({x:t,y:c.nss_zero[i]})),borderColor:C.a,pointRadius:0,borderWidth:2},
+    {label:'Forward (NSS)',data:c.t.map((t,i)=>({x:t,y:c.fwd[i]})),borderColor:C.m,borderDash:[4,4],pointRadius:0,borderWidth:1.5}]},
+    options:{scales:{x:{type:'linear',title:{display:true,text:'Maturity (years)'}},y:{title:{display:true,text:'%'}}}}});
+  const cf=await get('/api/cashflows');
+  chart('cfChart',{type:'bar',data:{labels:cf.t.map(t=>Math.floor(t)),datasets:[{label:'Expected benefits ($M)',data:cf.amount.map(a=>a/1e6),backgroundColor:C.a}]},
+    options:{plugins:{legend:{display:false}},scales:{x:{title:{display:true,text:'Years from today'},ticks:{maxTicksLimit:9}},y:{title:{display:true,text:'$M'}}}}});
+  hedge();shock();longevity();project();
+}
+async function hedge(){
+  const t=$('tgt').value,p=$('phys').value,sw=$('swaps').checked;$('tgtV').textContent=P(t,0);$('physV').textContent=P(p,0);
+  const h=await get(`/api/hedge?target=${t}&physical=${p}&swaps=${sw}`);
+  chart('krdChart',{type:'bar',data:{labels:h.key_rates.map(k=>k.tenor+'y'),datasets:[
+    {label:'Target (ratio × liability)',data:h.key_rates.map(k=>k.liability_dv01*h.target_ratio/1e3),backgroundColor:C.m},
+    {label:'Hedge',data:h.key_rates.map(k=>k.hedge_dv01/1e3),backgroundColor:C.a}]},
+    options:{scales:{y:{title:{display:true,text:'DV01 ($K per bp)'}}}}});
+  $('hedgeSub').innerHTML=`Achieved hedge ratio <b>${P(h.achieved_ratio)}</b> · key-rate mismatch <b>${h.key_rate_mismatch_pct.toFixed(1)}%</b> · bond budget ${M(h.physical_budget)} · swap notional ${M(h.swap_notional)}`;
+  $('holdings').innerHTML='<tr><th>Instrument</th><th>Amount</th></tr>'+h.holdings.sort((a,b)=>b.amount-a.amount).map(x=>`<tr><td>${x.instrument}${x.kind==='swap'?' <span class="pill">notional</span>':''}</td><td>${M(x.amount)}</td></tr>`).join('');
+}
+async function shock(){
+  const bp=$('shock').value;$('shockV').textContent=(bp>0?'+':'')+bp+'bp';
+  const s=await get(`/api/shock?bp=${bp}`);
+  $('shockT').innerHTML=`<tr><td>Liability</td><td>${M(s.liability_before)} → ${M(s.liability_after)}</td></tr><tr><td>Change</td><td class="${s.change>0?'bad':'good'}">${s.change>0?'+':''}${M(s.change)} (${s.change_pct.toFixed(1)}%)</td></tr><tr><td>Funded ratio if unhedged</td><td>${P(s.funded_ratio_after_if_unhedged)}</td></tr>`;
+}
+async function longevity(){
+  const l=await get('/api/longevity?delta=0.005');
+  $('lonT').innerHTML=`<tr><td>Improvement +0.5%/yr</td><td class="bad">+${M(l.change)} (${l.change_pct.toFixed(1)}%)</td></tr>`;
+}
+let proj;
+async function project(){
+  proj=await get(`/api/project?years=10&n=5000&rates_only=${$('ratesOnly').checked}`);
+  const sel=$('strat'),cur=sel.value;sel.innerHTML=proj.strategies.map((s,i)=>`<option value="${i}">${s.metrics.strategy}</option>`).join('');if(cur)sel.value=cur;
+  drawFan();
+  $('stratT').innerHTML='<tr><th>Strategy</th><th>Median FR yr 10</th><th>5th pct</th><th>P(FR&lt;80%)</th><th>1-yr surplus VaR95</th><th>CVaR95</th><th>PV contributions</th><th>Avg hedge ratio</th></tr>'+
+   proj.strategies.map(({metrics:m})=>`<tr><td>${m.strategy}</td><td>${P(m.funded_ratio_end_percentiles[50])}</td><td>${P(m.funded_ratio_end_percentiles[5])}</td><td>${P(m.prob_end_below_80pct)}</td><td>${m.surplus_var95_1y_pct_of_liability.toFixed(1)}%</td><td>${m.surplus_cvar95_1y_pct_of_liability.toFixed(1)}%</td><td>${M(m.contributions_pv_mean)}</td><td>${P(m.avg_hedge_ratio,0)}</td></tr>`).join('');
+}
+function drawFan(){
+  const f=proj.strategies[$('strat').value].fan;
+  chart('fanChart',{type:'line',data:{labels:f.years,datasets:[
+    {label:'95th',data:f.p95.map(x=>x*100),borderWidth:0,pointRadius:0,fill:'+4',backgroundColor:'rgba(78,161,255,.15)'},
+    {label:'75th',data:f.p75.map(x=>x*100),borderWidth:0,pointRadius:0,fill:'+2',backgroundColor:'rgba(78,161,255,.25)'},
+    {label:'Median',data:f.p50.map(x=>x*100),borderColor:C.a,borderWidth:2,pointRadius:0},
+    {label:'25th',data:f.p25.map(x=>x*100),borderWidth:0,pointRadius:0},
+    {label:'5th',data:f.p5.map(x=>x*100),borderWidth:0,pointRadius:0}]},
+    options:{plugins:{legend:{display:false}},scales:{x:{title:{display:true,text:'Year'}},y:{title:{display:true,text:'Funded ratio %'}}}}});
+}
+async function ask(){
+  $('answer').textContent='Thinking…';
+  const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:$('q').value})});
+  const j=await r.json();
+  if(!r.ok){$('answer').textContent=j.detail;return}
+  $('answer').innerHTML=`${j.answer.replace(/</g,'&lt;')}\n\n<span class="pill">tools: ${j.tool_calls.map(c=>c.tool).join(', ')}</span> <span class="pill">grounding ${(j.audit.grounding_score*100).toFixed(0)}% of ${j.audit.numbers_checked} numbers</span>`;
+}
+['tgt','phys','swaps'].forEach(id=>$(id).addEventListener('input',hedge));
+$('shock').addEventListener('input',shock);$('strat').addEventListener('change',drawFan);$('ratesOnly').addEventListener('change',project);$('askBtn').addEventListener('click',ask);
+init();
+</script>
+</body>
+</html>
